@@ -35,40 +35,48 @@ class InferlessPythonModel:
         return mp3_bytes
 
     def infer(self, inputs, stream_output_handler):
+        # Reset streamer properties
         self.streamer.token_cache = None
         self.streamer.to_yield = 0
         
-        input_value = inputs["input_value"]  # This should be the description
-        prompt_value = inputs["prompt_value"]  # This is the text to speak
+        # Extract input and prompt values from the inputs dictionary
+        input_value = inputs["input_value"]
+        prompt_value = inputs["prompt_value"]
         
-        # Use separate tokenizers for description and prompt
-        description_inputs = self.streamer.description_tokenizer(input_value, return_tensors="pt").to(self.streamer.device)
-        prompt_inputs = self.streamer.tokenizer(prompt_value, return_tensors="pt").to(self.streamer.device)
+        # Tokenize input and prompt
+        inputs_ = self.streamer.tokenizer(input_value, return_tensors="pt").to(self.streamer.device)
+        prompt = self.streamer.tokenizer(prompt_value, return_tensors="pt").to(self.streamer.device)
         
+        # Set up generation kwargs for the model
         generation_kwargs = dict(
-            input_ids=description_inputs.input_ids,
-            attention_mask=description_inputs.attention_mask,
-            prompt_input_ids=prompt_inputs.input_ids,
-            prompt_attention_mask=prompt_inputs.attention_mask,
+            input_ids=inputs_.input_ids,
+            prompt_input_ids=prompt.input_ids,
             streamer=self.streamer,
             do_sample=True,
             temperature=1.0,
             min_new_tokens=10)
         
+        # Start a new thread for model generation
         thread = Thread(target=self.streamer.model.generate, kwargs=generation_kwargs)
         thread.start()
         
+        # Process and stream the generated audio
         for new_audio in self.streamer:
+            # Convert numpy array to MP3 and encode as base64 string
             mp3_bytes = self.numpy_to_mp3(new_audio, sampling_rate=self.streamer.sampling_rate)
             mp3_str = base64.b64encode(mp3_bytes).decode('utf-8')
             
-            output_dict = {"OUT": mp3_str}
+            # Prepare and send the output dictionary
+            output_dict = {}
+            output_dict["OUT"] = mp3_str
             stream_output_handler.send_streamed_output(output_dict)
         
+        # Wait for the generation thread to complete
         thread.join()
+        
+        # Finalize the streamed output
         stream_output_handler.finalise_streamed_output()
 
-    
     def finalize(self):
         # Clean up resources
         self.streamer = None
