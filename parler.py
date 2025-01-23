@@ -16,7 +16,7 @@ class ParlerTTSStreamer(BaseStreamer):
         self.tokenizer = AutoTokenizer.from_pretrained(repo_id)
         self.description_tokenizer = AutoTokenizer.from_pretrained(repo_id)
 
-        self.model = ParlerTTSForConditionalGeneration.from_pretrained(repo_id, torch_dtype=torch_dtype, low_cpu_mem_usage=True).to(self.device)
+        self.model = ParlerTTSForConditionalGeneration.from_pretrained(repo_id, torch_dtype=torch_dtype, low_cpu_mem_usage=True).to_empty(device=self.device)
         self.decoder = self.model.decoder
         self.audio_encoder = self.model.audio_encoder
         self.generation_config = self.model.generation_config
