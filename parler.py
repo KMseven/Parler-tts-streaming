@@ -7,7 +7,7 @@ from parler_tts import ParlerTTSForConditionalGeneration
 from transformers import AutoTokenizer
 from transformers.generation.streamers import BaseStreamer
 
-class IndicParlerTTSStreamer(BaseStreamer):
+class ParlerTTSStreamer(BaseStreamer):
     def __init__(self):
         self.device = "cuda:0"
         torch_dtype = torch.float16
