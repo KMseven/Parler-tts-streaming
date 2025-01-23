@@ -70,31 +70,32 @@ class ParlerTTSStreamer(BaseStreamer):
         audio_values = output_values.audio_values[0, 0]
         return audio_values.cpu().float().numpy()
 
-    def put(self, value):
-        if isinstance(value, list):
-            value = torch.tensor(value, device=self.device)
-            
-        batch_size = value.shape[0] // self.decoder.num_codebooks
-     
+    def put(self, new_tokens: torch.Tensor):
+        # 1. Accumulate incoming tokens
         if self.token_cache is None:
-            self.token_cache = value
+            self.token_cache = new_tokens
         else:
-            self.token_cache = torch.concatenate([self.token_cache, value[:, None]], dim=-1)
-
-        if self.token_cache.shape[-1] % self.play_steps == 0:
+            self.token_cache = torch.cat([self.token_cache, new_tokens], dim=-1)
+    
+        # 2. Check if we reached chunk size
+        if self.token_cache.shape[-1] >= self.play_steps:
+            # Decode everything
             audio_values = self.apply_delay_pattern_mask(self.token_cache)
-            self.on_finalized_audio(audio_values[self.to_yield : -self.stride])
-            self.to_yield += len(audio_values) - self.to_yield - self.stride
-
+    
+            # Slice out new portion
+            new_audio = audio_values[self.already_emitted_samples : ]
+    
+            self.on_finalized_audio(new_audio)
+            self.already_emitted_samples = audio_values.shape[0]
+    
     def end(self):
+        # Final decode
         if self.token_cache is not None:
-            if isinstance(self.token_cache, list):
-                self.token_cache = torch.tensor(self.token_cache, device=self.device)
             audio_values = self.apply_delay_pattern_mask(self.token_cache)
+            new_audio = audio_values[self.already_emitted_samples : ]
+            self.on_finalized_audio(new_audio, stream_end=True)
         else:
-            audio_values = np.zeros(self.to_yield)
-
-        self.on_finalized_audio(audio_values[self.to_yield :], stream_end=True)
+            self.on_finalized_audio(np.array([]), stream_end=True)
 
     def on_finalized_audio(self, audio: np.ndarray, stream_end: bool = False):
         self.audio_queue.put(audio, timeout=self.timeout)
