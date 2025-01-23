@@ -38,29 +38,29 @@ class ParlerTTSStreamer(BaseStreamer):
         self.timeout = None
 
     def apply_delay_pattern_mask(self, input_ids):
+        if isinstance(input_ids, list):
+            input_ids = torch.tensor(input_ids, device=self.device)
+            
         _, delay_pattern_mask = self.decoder.build_delay_pattern_mask(
             input_ids[:, :1],
             bos_token_id=self.generation_config.bos_token_id,
             pad_token_id=self.generation_config.decoder_start_token_id,
             max_length=input_ids.shape[-1],
         )
+        
         input_ids = self.decoder.apply_delay_pattern_mask(input_ids, delay_pattern_mask)
-
         mask = (delay_pattern_mask != self.generation_config.bos_token_id) & (delay_pattern_mask != self.generation_config.pad_token_id)
         input_ids = input_ids[mask].reshape(1, self.decoder.num_codebooks, -1)
-        input_ids = input_ids[None, ...]
-        input_ids = input_ids.to(self.audio_encoder.device)
+        input_ids = input_ids[None, ...].to(self.audio_encoder.device)
 
         decode_sequentially = (
             self.generation_config.bos_token_id in input_ids
             or self.generation_config.pad_token_id in input_ids
             or self.generation_config.eos_token_id in input_ids
         )
+        
         if not decode_sequentially:
-            output_values = self.audio_encoder.decode(
-                input_ids,
-                audio_scales=[None],
-            )
+            output_values = self.audio_encoder.decode(input_ids, audio_scales=[None])
         else:
             sample = input_ids[:, 0]
             sample_mask = (sample >= self.audio_encoder.config.codebook_size).sum(dim=(0, 1)) == 0
@@ -71,6 +71,9 @@ class ParlerTTSStreamer(BaseStreamer):
         return audio_values.cpu().float().numpy()
 
     def put(self, value):
+        if isinstance(value, list):
+            value = torch.tensor(value, device=self.device)
+            
         batch_size = value.shape[0] // self.decoder.num_codebooks
      
         if self.token_cache is None:
@@ -85,6 +88,8 @@ class ParlerTTSStreamer(BaseStreamer):
 
     def end(self):
         if self.token_cache is not None:
+            if isinstance(self.token_cache, list):
+                self.token_cache = torch.tensor(self.token_cache, device=self.device)
             audio_values = self.apply_delay_pattern_mask(self.token_cache)
         else:
             audio_values = np.zeros(self.to_yield)
