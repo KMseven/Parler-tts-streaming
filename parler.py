@@ -13,7 +13,7 @@ class ParlerTTSStreamer(BaseStreamer):
         torch_dtype = torch.float16
         
         # Updated to use v1 model
-        repo_id = "ai4bharat/indic-parler-tts"
+        repo_id = "parler-tts/parler-tts-mini-v1"
         self.tokenizer = AutoTokenizer.from_pretrained(repo_id)
         self.feature_extractor = AutoFeatureExtractor.from_pretrained(repo_id)
         
@@ -107,9 +107,10 @@ class ParlerTTSStreamer(BaseStreamer):
             raise ValueError("ParlerTTSStreamer only supports batch size 1")
             
         if self.token_cache is None:
-            self.token_cache = value
+            self.token_cache = value[:, None] if value.dim() == 1 else value
         else:
-            self.token_cache = torch.concatenate([self.token_cache, value[:, None]], dim=-1)
+            value_expanded = value[:, None] if value.dim() == 1 else value
+            self.token_cache = torch.concatenate([self.token_cache, value_expanded], dim=-1)
             
         if self.token_cache.shape[-1] % self.play_steps == 0:
             audio_values = self.apply_delay_pattern_mask(self.token_cache)
