@@ -12,21 +12,29 @@ class InferlessPythonModel:
 
     def numpy_to_mp3(self, audio_array, sampling_rate):
         if audio_array.size == 0:
-            return b''
-            
-        # More precise scaling to 16-bit range
-        audio_array = np.clip(audio_array * 32767, -32768, 32767).astype(np.int16)
+            return b''  # Return empty bytes for empty audio
+        # Convert numpy array to MP3 format
+        if np.issubdtype(audio_array.dtype, np.floating):
+            # Normalize floating-point audio data to 16-bit integer range
+            max_val = np.max(np.abs(audio_array)) if audio_array.size > 0 else 1
+            audio_array = (audio_array / max_val) * 32767
+            audio_array = audio_array.astype(np.int16)
         
+        # Create an AudioSegment object from the numpy array
         audio_segment = AudioSegment(
             audio_array.tobytes(),
             frame_rate=sampling_rate,
-            sample_width=2,  # 16-bit = 2 bytes
+            sample_width=audio_array.dtype.itemsize,
             channels=1
         )
         
+        # Export the AudioSegment to MP3 format
         mp3_io = io.BytesIO()
         audio_segment.export(mp3_io, format="mp3", bitrate="320k")
-        return mp3_io.getvalue()
+        mp3_bytes = mp3_io.getvalue()
+        mp3_io.close()
+        
+        return mp3_bytes
 
     def infer(self, inputs, stream_output_handler):
         # Reset streamer properties
