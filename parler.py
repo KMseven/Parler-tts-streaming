@@ -11,7 +11,7 @@ class ParlerTTSStreamer(BaseStreamer):
         self.device = "cuda:0"
         torch_dtype = torch.float16
         
-        repo_id = "parler-tts/parler-tts-mini-v1"
+        repo_id = "ai4bharat/indic-parler-tts"
         self.tokenizer = AutoTokenizer.from_pretrained(repo_id, use_fast=True)
         self.feature_extractor = AutoFeatureExtractor.from_pretrained(repo_id)
         
