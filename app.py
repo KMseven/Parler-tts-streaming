@@ -10,23 +10,23 @@ class InferlessPythonModel:
         # Initialize the ParlerTTSStreamer object
         self.streamer = ParlerTTSStreamer()
 
-def numpy_to_mp3(self, audio_array, sampling_rate):
-    if audio_array.size == 0:
-        return b''
+    def numpy_to_mp3(self, audio_array, sampling_rate):
+        if audio_array.size == 0:
+            return b''
+            
+        # More precise scaling to 16-bit range
+        audio_array = np.clip(audio_array * 32767, -32768, 32767).astype(np.int16)
         
-    # More precise scaling to 16-bit range
-    audio_array = np.clip(audio_array * 32767, -32768, 32767).astype(np.int16)
-    
-    audio_segment = AudioSegment(
-        audio_array.tobytes(),
-        frame_rate=sampling_rate,
-        sample_width=2,  # 16-bit = 2 bytes
-        channels=1
-    )
-    
-    mp3_io = io.BytesIO()
-    audio_segment.export(mp3_io, format="mp3", bitrate="320k")
-    return mp3_io.getvalue()
+        audio_segment = AudioSegment(
+            audio_array.tobytes(),
+            frame_rate=sampling_rate,
+            sample_width=2,  # 16-bit = 2 bytes
+            channels=1
+        )
+        
+        mp3_io = io.BytesIO()
+        audio_segment.export(mp3_io, format="mp3", bitrate="320k")
+        return mp3_io.getvalue()
 
     def infer(self, inputs, stream_output_handler):
         # Reset streamer properties
