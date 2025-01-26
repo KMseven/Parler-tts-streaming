@@ -5,4 +5,5 @@ build:
   python_packages:
     - "accelerate==0.31.0"
     - "pydub==0.25.1"
-    - "git+https://github.com/huggingface/parler-tts@8b8c576e2dbdc29172e30be7d68fac9357cd92c5#egg=parler-tts"
+    - "git+https://github.com/huggingface/parler-tts"
+    - "flash-attn --no-build-isolation"
