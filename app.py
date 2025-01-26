@@ -1,84 +1,117 @@
-import io
-import base64
+import math
+from queue import Queue
 import numpy as np
-from threading import Thread
-from pydub import AudioSegment
-from parler import ParlerTTSStreamer
+import torch
+from transformers import AutoTokenizer, AutoFeatureExtractor
+from transformers.generation.streamers import BaseStreamer
+from parler_tts import ParlerTTSForConditionalGeneration
 
-class InferlessPythonModel:
-    def initialize(self):
-        # Initialize the ParlerTTSStreamer object
-        self.streamer = ParlerTTSStreamer()
-
-    def numpy_to_mp3(self, audio_array, sampling_rate):
-        if audio_array.size == 0:
-            return b''  # Return empty bytes for empty audio
-        # Convert numpy array to MP3 format
-        if np.issubdtype(audio_array.dtype, np.floating):
-            # Normalize floating-point audio data to 16-bit integer range
-            max_val = np.max(np.abs(audio_array)) if audio_array.size > 0 else 1
-            audio_array = (audio_array / max_val) * 32767
-            audio_array = audio_array.astype(np.int16)
+class ParlerTTSStreamer(BaseStreamer):
+    def __init__(self):
+        self.device = "cuda:0"
+        torch_dtype = torch.float16
         
-        # Create an AudioSegment object from the numpy array
-        audio_segment = AudioSegment(
-            audio_array.tobytes(),
-            frame_rate=sampling_rate,
-            sample_width=audio_array.dtype.itemsize,
-            channels=1
+        repo_id = "ai4bharat/indic-parler-tts"
+        self.tokenizer = AutoTokenizer.from_pretrained(repo_id, use_fast=True)
+        self.feature_extractor = AutoFeatureExtractor.from_pretrained(repo_id)
+        
+        self.model = ParlerTTSForConditionalGeneration.from_pretrained(
+            repo_id, 
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True
+        ).to(self.device)
+        
+        self.decoder = self.model.decoder
+        self.audio_encoder = self.model.audio_encoder
+        self.generation_config = self.model.generation_config
+        self.sampling_rate = self.model.config.sampling_rate
+        
+        play_steps_in_s = 0.25  # Reduced from 2.0 for better responsiveness
+        frame_rate = self.model.audio_encoder.config.frame_rate
+        play_steps = int(frame_rate * play_steps_in_s)
+        
+        hop_length = math.floor(self.audio_encoder.config.sampling_rate / self.audio_encoder.config.frame_rate)
+        self.play_steps = play_steps
+        self.stride = hop_length * (play_steps - self.decoder.num_codebooks) // 3  # Changed from 6 to 3
+        
+        self.token_cache = None
+        self.to_yield = 0
+        self.audio_queue = Queue()
+        self.stop_signal = None
+        self.timeout = None
+
+    def apply_delay_pattern_mask(self, input_ids):
+        _, delay_pattern_mask = self.decoder.build_delay_pattern_mask(
+            input_ids[:, :1],
+            bos_token_id=self.generation_config.bos_token_id,
+            pad_token_id=self.generation_config.decoder_start_token_id,
+            max_length=input_ids.shape[-1],
         )
         
-        # Export the AudioSegment to MP3 format
-        mp3_io = io.BytesIO()
-        audio_segment.export(mp3_io, format="mp3", bitrate="320k")
-        mp3_bytes = mp3_io.getvalue()
-        mp3_io.close()
-        
-        return mp3_bytes
+        input_ids = self.decoder.apply_delay_pattern_mask(input_ids, delay_pattern_mask)
+        mask = (delay_pattern_mask != self.generation_config.bos_token_id) & (delay_pattern_mask != self.generation_config.pad_token_id)
+        input_ids = input_ids[mask].reshape(1, self.decoder.num_codebooks, -1)
+        input_ids = input_ids[None, ...]
+        input_ids = input_ids.to(self.audio_encoder.device)
 
-    def infer(self, inputs, stream_output_handler):
-        # Reset streamer properties
-        self.streamer.token_cache = None
-        self.streamer.to_yield = 0
+        output_values = self.audio_encoder.decode(
+            audio_codes=input_ids,
+            audio_scales=[None],
+        ).audio_values
         
-        # Extract input and prompt values from the inputs dictionary
-        input_value = inputs["input_value"]
-        prompt_value = inputs["prompt_value"]
+        audio_values = output_values[0, 0]
+        return audio_values.cpu().float().numpy()
+
+    def put(self, value):
+        batch_size = value.shape[0] // self.decoder.num_codebooks
+        if batch_size > 1:
+            raise ValueError("ParlerTTSStreamer only supports batch size 1")
         
-        # Tokenize input and prompt
-        inputs_ = self.streamer.tokenizer(input_value, return_tensors="pt").to(self.streamer.device)
-        prompt = self.streamer.tokenizer(prompt_value, return_tensors="pt").to(self.streamer.device)
-        
-        # Set up generation kwargs for the model
-        generation_kwargs = dict(
-            input_ids=inputs_.input_ids,
-            prompt_input_ids=prompt.input_ids,
-            streamer=self.streamer,
-            do_sample=True,
-            temperature=1.0,
-            min_new_tokens=10)
-        
-        # Start a new thread for model generation
-        thread = Thread(target=self.streamer.model.generate, kwargs=generation_kwargs)
-        thread.start()
-        
-        # Process and stream the generated audio
-        for new_audio in self.streamer:
-            # Convert numpy array to MP3 and encode as base64 string
-            mp3_bytes = self.numpy_to_mp3(new_audio, sampling_rate=self.streamer.sampling_rate)
-            mp3_str = base64.b64encode(mp3_bytes).decode('utf-8')
+        value_expanded = value[:, None] if value.dim() == 1 else value
+        if self.token_cache is None:
+            self.token_cache = value_expanded
+        else:
+            self.token_cache = torch.concatenate([self.token_cache, value_expanded], dim=-1)
             
-            # Prepare and send the output dictionary
-            output_dict = {}
-            output_dict["OUT"] = mp3_str
-            stream_output_handler.send_streamed_output(output_dict)
-        
-        # Wait for the generation thread to complete
-        thread.join()
-        
-        # Finalize the streamed output
-        stream_output_handler.finalise_streamed_output()
+        if self.token_cache.shape[-1] % self.play_steps == 0:
+            audio_values = self.apply_delay_pattern_mask(self.token_cache)
+            if len(audio_values) > 0:  # Add check for empty audio
+                self.on_finalized_audio(audio_values[self.to_yield : -self.stride])
+                self.to_yield += len(audio_values) - self.to_yield - self.stride
 
-    def finalize(self):
-        # Clean up resources
-        self.streamer = None
+    def end(self):
+        if self.token_cache is not None:
+            audio_values = self.apply_delay_pattern_mask(self.token_cache)
+            if len(audio_values) > 0:  # Add check for empty audio
+                self.on_finalized_audio(audio_values[self.to_yield:], stream_end=True)
+        self.audio_queue.put(self.stop_signal)
+
+    def on_finalized_audio(self, audio: np.ndarray, stream_end: bool = False):
+        if audio is None or len(audio) == 0:
+            return
+            
+        # Normalize audio to 16-bit PCM range
+        audio = np.clip(audio * 32767, -32768, 32767).astype(np.int16)
+        
+        # Buffer the audio for smoother playback
+        self.audio_buffer = np.concatenate((self.audio_buffer, audio)) if hasattr(self, 'audio_buffer') else audio
+        
+        # Only send to queue when buffer reaches sufficient size
+        buffer_size = int(self.sampling_rate * 0.2)  # 200ms buffer
+        while len(self.audio_buffer) >= buffer_size:
+            chunk = self.audio_buffer[:buffer_size]
+            self.audio_buffer = self.audio_buffer[buffer_size:]
+            self.audio_queue.put(chunk, timeout=self.timeout)
+            
+        if stream_end and hasattr(self, 'audio_buffer') and len(self.audio_buffer) > 0:
+            self.audio_queue.put(self.audio_buffer, timeout=self.timeout)
+            self.audio_queue.put(self.stop_signal, timeout=self.timeout)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        value = self.audio_queue.get(timeout=self.timeout)
+        if not isinstance(value, np.ndarray) and value == self.stop_signal:
+            raise StopIteration()
+        return value
