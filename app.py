@@ -11,10 +11,12 @@ class InferlessPythonModel:
         self.streamer = ParlerTTSStreamer()
 
     def numpy_to_mp3(self, audio_array, sampling_rate):
+        if audio_array.size == 0:
+            return b''  # Return empty bytes for empty audio
         # Convert numpy array to MP3 format
         if np.issubdtype(audio_array.dtype, np.floating):
             # Normalize floating-point audio data to 16-bit integer range
-            max_val = np.max(np.abs(audio_array))
+            max_val = np.max(np.abs(audio_array)) if audio_array.size > 0 else 1
             audio_array = (audio_array / max_val) * 32767
             audio_array = audio_array.astype(np.int16)
         
