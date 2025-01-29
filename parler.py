@@ -29,12 +29,12 @@ class ParlerTTSStreamer(BaseStreamer):
         self.audio_encoder = self.model.audio_encoder
         self.generation_config = self.model.generation_config
         
-        # Setup v1-specific attributes
-        self.use_audio_scales = getattr(self.model, 'use_audio_scales', True)
-        self.use_4dim_audio_codes = getattr(self.model, 'use_4dim_audio_codes', True)
-        self.audio_kwargs = {}
-        if self.use_audio_scales:
-            self.audio_kwargs["audio_scales"] = [None]
+        # # Setup v1-specific attributes
+        # self.use_audio_scales = getattr(self.model, 'use_audio_scales', True)
+        # self.use_4dim_audio_codes = getattr(self.model, 'use_4dim_audio_codes', True)
+        # self.audio_kwargs = {}
+        # if self.use_audio_scales:
+        #     self.audio_kwargs["audio_scales"] = [None]
 
         # Configure sampling and frame rates
         self.sampling_rate = self.model.audio_encoder.config.sampling_rate
@@ -72,9 +72,10 @@ class ParlerTTSStreamer(BaseStreamer):
         mask = (delay_pattern_mask != self.generation_config.bos_token_id) & (delay_pattern_mask != self.generation_config.pad_token_id)
         input_ids = input_ids[mask].reshape(1, self.decoder.num_codebooks, -1)
         
-        # Handle 4D audio codes for v1
-        if self.use_4dim_audio_codes:
-            input_ids = input_ids[None, ...]
+        # # Handle 4D audio codes for v1
+        # if self.use_4dim_audio_codes:
+        #     input_ids = input_ids[None, ...]
+        input_ids = input_ids[None, ...]
         
         input_ids = input_ids.to(self.audio_encoder.device)
         
@@ -86,45 +87,43 @@ class ParlerTTSStreamer(BaseStreamer):
         )
         
         if not decode_sequentially:
-            sample = self.audio_encoder.decode(
+            output_values = self.audio_encoder.decode(
                 audio_codes=input_ids,
-                **self.audio_kwargs,
-            ).audio_values
-            output_values = sample if sample.ndim == 3 else sample.unsqueeze(0)
+                # **self.audio_kwargs,
+                audio_scales=[None]
+            )
         else:
-            sample = input_ids[:, 0] if self.use_4dim_audio_codes else input_ids[0]
-            sample_mask = ((sample >= self.audio_encoder.config.codebook_size).sum(dim=(0, 1)) == 0) if self.use_4dim_audio_codes else ((sample >= self.audio_encoder.config.codebook_size).sum(dim=0) == 0)
-            sample = sample[:, :, sample_mask] if self.use_4dim_audio_codes else sample[:, sample_mask]
-            sample = self.audio_encoder.decode(audio_codes=sample[None, ...], **self.audio_kwargs).audio_values
-            output_values = sample if sample.ndim == 3 else sample.unsqueeze(0)
+            sample = input_ids[:, 0]
+            sample_mask = (sample >= self.audio_encoder.config.codebook_size).sum(dim=(0, 1)) == 0
+            sample = sample[:, :, sample_mask]
+            output_values = self.audio_encoder.decode(sample[None, ...], [None])
         
-        audio_values = output_values[0, 0]
+        audio_values = output_values.audio_values[0, 0]
         return audio_values.cpu().float().numpy()
 
     def put(self, value):
         batch_size = value.shape[0] // self.decoder.num_codebooks
-        if batch_size > 1:
-            raise ValueError("ParlerTTSStreamer only supports batch size 1")
-            
+     
         if self.token_cache is None:
-            self.token_cache = value[:, None] if value.dim() == 1 else value
+            self.token_cache = value
         else:
-            value_expanded = value[:, None] if value.dim() == 1 else value
-            self.token_cache = torch.concatenate([self.token_cache, value_expanded], dim=-1)
-            
+            self.token_cache = torch.concatenate([self.token_cache, value[:, None]], dim=-1)
+
         if self.token_cache.shape[-1] % self.play_steps == 0:
             audio_values = self.apply_delay_pattern_mask(self.token_cache)
             self.on_finalized_audio(audio_values[self.to_yield : -self.stride])
             self.to_yield += len(audio_values) - self.to_yield - self.stride
 
     def end(self):
+        # Flushes any remaining cache and appends the stop symbol
         if self.token_cache is not None:
             audio_values = self.apply_delay_pattern_mask(self.token_cache)
         else:
             audio_values = np.zeros(self.to_yield)
-            
+
         self.on_finalized_audio(audio_values[self.to_yield :], stream_end=True)
 
+        
     def on_finalized_audio(self, audio: np.ndarray, stream_end: bool = False):
         self.audio_queue.put(audio, timeout=self.timeout)
         if stream_end:
