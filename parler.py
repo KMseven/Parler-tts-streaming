@@ -15,26 +15,12 @@ class ParlerTTSStreamer(BaseStreamer):
         repo_id = "ai4bharat/indic-parler-tts"
         self.tokenizer = AutoTokenizer.from_pretrained(repo_id)
         
-        # Initialize model with empty weights first
+        # Initialize model
         self.model = ParlerTTSForConditionalGeneration.from_pretrained(
-            repo_id,
+            repo_id, 
             torch_dtype=torch_dtype,
-            low_cpu_mem_usage=True,
-            device_map=None  # Prevent automatic device mapping
-        )
-        
-        # Move model to device using to_empty
-        self.model = self.model.to_empty(device=self.device)
-        
-        # Now load the weights
-        with torch.device(self.device):
-            self.model.load_state_dict(
-                ParlerTTSForConditionalGeneration.from_pretrained(
-                    repo_id,
-                    torch_dtype=torch_dtype,
-                    low_cpu_mem_usage=True
-                ).state_dict()
-            )
+            low_cpu_mem_usage=False
+        ).to(self.device)
         
         # Setup components and configurations
         self.decoder = self.model.decoder
@@ -89,14 +75,13 @@ class ParlerTTSStreamer(BaseStreamer):
         
         if not decode_sequentially:
             output_values = self.audio_encoder.decode(
-                audio_codes=input_ids,
-                audio_scales=[None]
+                audio_codes=input_ids
             )
         else:
             sample = input_ids[:, 0]
             sample_mask = (sample >= self.audio_encoder.config.codebook_size).sum(dim=(0, 1)) == 0
             sample = sample[:, :, sample_mask]
-            output_values = self.audio_encoder.decode(sample[None, ...], [None])
+            output_values = self.audio_encoder.decode(sample[None, ...])
         
         audio_values = output_values.audio_values[0, 0]
         return audio_values.cpu().float().numpy()
