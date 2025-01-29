@@ -2,8 +2,7 @@ import math
 from queue import Queue
 import numpy as np
 import torch
-
-from transformers import AutoTokenizer, AutoFeatureExtractor
+from transformers import AutoTokenizer
 from transformers.generation.streamers import BaseStreamer
 from parler_tts import ParlerTTSForConditionalGeneration
 
@@ -16,25 +15,32 @@ class ParlerTTSStreamer(BaseStreamer):
         repo_id = "ai4bharat/indic-parler-tts"
         self.tokenizer = AutoTokenizer.from_pretrained(repo_id)
         
-        # Initialize model with v1 configuration
+        # Initialize model with empty weights first
         self.model = ParlerTTSForConditionalGeneration.from_pretrained(
-            repo_id, 
-            torch_dtype=torch_dtype, 
-            low_cpu_mem_usage=True
-        ).to(self.device)
+            repo_id,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+            device_map=None  # Prevent automatic device mapping
+        )
+        
+        # Move model to device using to_empty
+        self.model = self.model.to_empty(device=self.device)
+        
+        # Now load the weights
+        with torch.device(self.device):
+            self.model.load_state_dict(
+                ParlerTTSForConditionalGeneration.from_pretrained(
+                    repo_id,
+                    torch_dtype=torch_dtype,
+                    low_cpu_mem_usage=True
+                ).state_dict()
+            )
         
         # Setup components and configurations
         self.decoder = self.model.decoder
         self.audio_encoder = self.model.audio_encoder
         self.generation_config = self.model.generation_config
         
-        # # Setup v1-specific attributes
-        # self.use_audio_scales = getattr(self.model, 'use_audio_scales', True)
-        # self.use_4dim_audio_codes = getattr(self.model, 'use_4dim_audio_codes', True)
-        # self.audio_kwargs = {}
-        # if self.use_audio_scales:
-        #     self.audio_kwargs["audio_scales"] = [None]
-
         # Configure sampling and frame rates
         self.sampling_rate = self.model.audio_encoder.config.sampling_rate
         frame_rate = self.model.audio_encoder.config.frame_rate
@@ -70,10 +76,6 @@ class ParlerTTSStreamer(BaseStreamer):
         # Filter mask
         mask = (delay_pattern_mask != self.generation_config.bos_token_id) & (delay_pattern_mask != self.generation_config.pad_token_id)
         input_ids = input_ids[mask].reshape(1, self.decoder.num_codebooks, -1)
-        
-        # # Handle 4D audio codes for v1
-        # if self.use_4dim_audio_codes:
-        #     input_ids = input_ids[None, ...]
         input_ids = input_ids[None, ...]
         
         input_ids = input_ids.to(self.audio_encoder.device)
@@ -88,7 +90,6 @@ class ParlerTTSStreamer(BaseStreamer):
         if not decode_sequentially:
             output_values = self.audio_encoder.decode(
                 audio_codes=input_ids,
-                # **self.audio_kwargs,
                 audio_scales=[None]
             )
         else:
@@ -114,14 +115,12 @@ class ParlerTTSStreamer(BaseStreamer):
             self.to_yield += len(audio_values) - self.to_yield - self.stride
 
     def end(self):
-        # Flushes any remaining cache and appends the stop symbol
         if self.token_cache is not None:
             audio_values = self.apply_delay_pattern_mask(self.token_cache)
         else:
             audio_values = np.zeros(self.to_yield)
 
         self.on_finalized_audio(audio_values[self.to_yield :], stream_end=True)
-
         
     def on_finalized_audio(self, audio: np.ndarray, stream_end: bool = False):
         self.audio_queue.put(audio, timeout=self.timeout)
