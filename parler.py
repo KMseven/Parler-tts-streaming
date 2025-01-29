@@ -12,7 +12,7 @@ class ParlerTTSStreamer(BaseStreamer):
         torch_dtype = torch.float16
         
         # Updated to use v1 model
-        repo_id = "ai4bharat/indic-parler-tts"
+        repo_id = "parler-tts/parler-tts-mini-v1.1"
         self.tokenizer = AutoTokenizer.from_pretrained(repo_id)
         
         # Initialize model
