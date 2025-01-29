@@ -15,7 +15,6 @@ class ParlerTTSStreamer(BaseStreamer):
         # Updated to use v1 model
         repo_id = "ai4bharat/indic-parler-tts"
         self.tokenizer = AutoTokenizer.from_pretrained(repo_id)
-        self.feature_extractor = AutoFeatureExtractor.from_pretrained(repo_id)
         
         # Initialize model with v1 configuration
         self.model = ParlerTTSForConditionalGeneration.from_pretrained(
