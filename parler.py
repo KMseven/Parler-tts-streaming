@@ -11,103 +11,83 @@ class ParlerTTSStreamer(BaseStreamer):
         self.device = "cuda:0"
         torch_dtype = torch.float16
         
-        # Updated to use v1 model
-        repo_id = "parler-tts/parler-tts-mini-v1.1"
+        repo_id = "ai4bharat/indic-parler-tts"
         self.tokenizer = AutoTokenizer.from_pretrained(repo_id)
         
-        # Initialize model
         self.model = ParlerTTSForConditionalGeneration.from_pretrained(
             repo_id, 
             torch_dtype=torch_dtype,
             low_cpu_mem_usage=False
         ).to(self.device)
         
-        # Setup components and configurations
         self.decoder = self.model.decoder
         self.audio_encoder = self.model.audio_encoder
         self.generation_config = self.model.generation_config
         
-        # Configure sampling and frame rates
+        # Audio configuration
         self.sampling_rate = self.model.audio_encoder.config.sampling_rate
-        frame_rate = self.model.audio_encoder.config.frame_rate
+        self.frame_rate = self.model.audio_encoder.config.frame_rate
         
-        # Setup streaming parameters
-        play_steps_in_s = 2.0
-        play_steps = int(frame_rate * play_steps_in_s)
-        self.play_steps = play_steps
-        
-        # Configure stride
-        hop_length = math.floor(self.audio_encoder.config.sampling_rate / self.audio_encoder.config.frame_rate)
-        self.stride = hop_length * (play_steps - self.decoder.num_codebooks) // 6
+        # Each code is 0.011 seconds, so for 1 second we need ~91 tokens
+        # We'll use a slightly smaller chunk for safety
+        self.tokens_per_second = int(1 / 0.011)  # ≈91 tokens
+        self.chunk_size = 86  # Tokens per chunk (approx 1 second of audio)
         
         # Initialize streaming variables
-        self.token_cache = None
-        self.to_yield = 0
+        self.token_cache = []
         self.audio_queue = Queue()
         self.stop_signal = None
         self.timeout = None
 
-    def apply_delay_pattern_mask(self, input_ids):
-        # Build delay pattern mask
-        _, delay_pattern_mask = self.decoder.build_delay_pattern_mask(
-            input_ids[:, :1],
-            bos_token_id=self.generation_config.bos_token_id,
-            pad_token_id=self.generation_config.decoder_start_token_id,
-            max_length=input_ids.shape[-1],
-        )
-        
-        # Apply pattern mask
-        input_ids = self.decoder.apply_delay_pattern_mask(input_ids, delay_pattern_mask)
-        
-        # Filter mask
-        mask = (delay_pattern_mask != self.generation_config.bos_token_id) & (delay_pattern_mask != self.generation_config.pad_token_id)
-        input_ids = input_ids[mask].reshape(1, self.decoder.num_codebooks, -1)
-        input_ids = input_ids[None, ...]
-        
-        input_ids = input_ids.to(self.audio_encoder.device)
-        
-        # Decode based on token presence
-        decode_sequentially = (
-            self.generation_config.bos_token_id in input_ids
-            or self.generation_config.pad_token_id in input_ids
-            or self.generation_config.eos_token_id in input_ids
-        )
-        
-        if not decode_sequentially:
-            output_values = self.audio_encoder.decode(
-                audio_codes=input_ids
-            )
-        else:
-            sample = input_ids[:, 0]
-            sample_mask = (sample >= self.audio_encoder.config.codebook_size).sum(dim=(0, 1)) == 0
-            sample = sample[:, :, sample_mask]
-            output_values = self.audio_encoder.decode(sample[None, ...])
-        
-        audio_values = output_values.audio_values[0, 0]
-        return audio_values.cpu().float().numpy()
+    def decode_chunk(self, tokens):
+        """Decode a chunk of tokens into audio."""
+        try:
+            # Reshape tokens to match model's expected format
+            tokens = tokens.reshape(1, -1, self.decoder.num_codebooks)
+            tokens = tokens.to(self.device)
+            
+            # Decode to audio using the DAC model
+            with torch.no_grad():
+                audio = self.audio_encoder.decode(tokens).audio_values
+            
+            return audio[0, 0].cpu().float().numpy()
+        except Exception as e:
+            print(f"Error decoding chunk: {e}")
+            print(f"Token shape: {tokens.shape}")
+            raise e
 
-    def put(self, value):
-        batch_size = value.shape[0] // self.decoder.num_codebooks
-     
-        if self.token_cache is None:
-            self.token_cache = value
-        else:
-            self.token_cache = torch.concatenate([self.token_cache, value[:, None]], dim=-1)
-
-        if self.token_cache.shape[-1] % self.play_steps == 0:
-            audio_values = self.apply_delay_pattern_mask(self.token_cache)
-            self.on_finalized_audio(audio_values[self.to_yield : -self.stride])
-            self.to_yield += len(audio_values) - self.to_yield - self.stride
+    def put(self, token_ids):
+        """Receive tokens from the model's generation process."""
+        # Add new tokens to cache
+        self.token_cache.append(token_ids.cpu())
+        
+        # If we have enough tokens for a chunk, process them
+        if len(self.token_cache) >= self.chunk_size:
+            # Convert list of tensors to single tensor
+            tokens = torch.stack(self.token_cache)
+            
+            # Decode the chunk to audio
+            audio = self.decode_chunk(tokens)
+            
+            # Queue the audio chunk
+            self.on_finalized_audio(audio)
+            
+            # Clear the cache
+            self.token_cache = []
 
     def end(self):
-        if self.token_cache is not None:
-            audio_values = self.apply_delay_pattern_mask(self.token_cache)
-        else:
-            audio_values = np.zeros(self.to_yield)
+        """Handle any remaining tokens when generation ends."""
+        if self.token_cache:
+            # Process any remaining tokens
+            tokens = torch.stack(self.token_cache)
+            audio = self.decode_chunk(tokens)
+            self.on_finalized_audio(audio)
+            
+        # Signal the end of streaming
+        self.audio_queue.put(self.stop_signal, timeout=self.timeout)
 
-        self.on_finalized_audio(audio_values[self.to_yield :], stream_end=True)
-        
     def on_finalized_audio(self, audio: np.ndarray, stream_end: bool = False):
+        """Queue the audio chunk for streaming."""
         self.audio_queue.put(audio, timeout=self.timeout)
         if stream_end:
             self.audio_queue.put(self.stop_signal, timeout=self.timeout)
@@ -116,8 +96,8 @@ class ParlerTTSStreamer(BaseStreamer):
         return self
 
     def __next__(self):
+        """Get the next chunk of audio for streaming."""
         value = self.audio_queue.get(timeout=self.timeout)
-        if not isinstance(value, np.ndarray) and value == self.stop_signal:
+        if value is self.stop_signal:
             raise StopIteration()
-        else:
-            return value
+        return value
